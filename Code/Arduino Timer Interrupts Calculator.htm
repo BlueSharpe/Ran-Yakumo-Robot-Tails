@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Arduino Timer Interrupts Calculator</title>
+<style>
+	body {
+		font-size: 12pt;
+		min-width: 35em;
+	}
+	textarea {
+		font-family: Monaco, monospace;
+		font-size: 10pt;
+		white-space: pre-wrap;
+		width: 50em;
+		height: 60em;
+	}
+	textarea#code2 {
+		height: 18em;
+	}
+	label[for*=code] {
+		display: block;
+	}
+</style>
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-71612109-3', 'auto');
+  ga('send', 'pageview');
+
+</script>
+<script type="text/javascript">
+	var timersDef = [ // ASC sorted by timer index
+		{
+			cmrMax: 255,
+			prescalerDef: [ // must be ASC sorted by 'value'
+				{ cs0: 1, cs1: 0, cs2: 0, value: 1 },
+				{ cs0: 0, cs1: 1, cs2: 0, value: 8 },
+				{ cs0: 1, cs1: 1, cs2: 0, value: 64 },
+				{ cs0: 0, cs1: 0, cs2: 1, value: 256 },
+				{ cs0: 1, cs1: 0, cs2: 1, value: 1024 }
+			],
+			ctcBit: "WGM01",
+		},
+		{
+			cmrMax: 65535,
+			prescalerDef: [ // must be ASC sorted by 'value'
+				{ cs0: 1, cs1: 0, cs2: 0, value: 1 },
+				{ cs0: 0, cs1: 1, cs2: 0, value: 8 },
+				{ cs0: 1, cs1: 1, cs2: 0, value: 64 },
+				{ cs0: 0, cs1: 0, cs2: 1, value: 256 },
+				{ cs0: 1, cs1: 0, cs2: 1, value: 1024 }
+			],
+			ctcBit: "WGM12",
+		},
+		{
+			cmrMax: 255,
+			prescalerDef: [ // must be ASC sorted by 'value'
+				{ cs0: 1, cs1: 0, cs2: 0, value: 1 },
+				{ cs0: 0, cs1: 1, cs2: 0, value: 8 },
+				{ cs0: 1, cs1: 1, cs2: 0, value: 32 },
+				{ cs0: 0, cs1: 0, cs2: 1, value: 64 }
+			],
+			ctcBit: "WGM21",
+		}
+	];
+	var codeTemplate = '\n// TIMER §timerNum§ for interrupt frequency §bestFreq§ Hz:\n\
+cli(); // stop interrupts\n\
+TCCR§timerNum§A = 0; // set entire TCCR§timerNum§A register to 0\n\
+TCCR§timerNum§B = 0; // same for TCCR§timerNum§B\n\
+TCNT§timerNum§  = 0; // initialize counter value to 0\n\
+// set compare match register for §bestFreq§ Hz increments\n\
+OCR§timerNum§A = §cmr§; // = §clockFreq§ / (§prescaler§ * §bestFreq§) - 1 (must be <§cmrMax§)\n\
+// turn on CTC mode\n\
+TCCR§timerNum§B |= (1 << §ctcBit§);\n\
+// Set CS§timerNum§2, CS§timerNum§1 and CS§timerNum§0 bits for §prescaler§ prescaler\n\
+TCCR§timerNum§B |= (§cs2§ << CS§timerNum§2) | (§cs1§ << CS§timerNum§1) | (§cs0§ << CS§timerNum§0);\n\
+// enable timer compare interrupt\n\
+TIMSK§timerNum§ |= (1 << OCIE§timerNum§A);\n\
+sei(); // allow interrupts\n\n';
+	
+	var codeTemplate2 = '\n\
+ISR(TIMER§timerNum§_COMPA_vect){\n\
+   //interrupt commands for TIMER §timerNum§ here\n\
+}\n\n';
+
+	var notUsableTemplate = "\n// Timer §timerNum§ is not usable for requested frequency.\n\n";
+
+	window.onload = function() { // init event handler setup
+		RefreshLimits();
+		GE("clock-freq").oninput = RefreshLimits;
+		GE("requested-freq").oninput = Calculate;
+		document.forms[0].onsubmit = function(e) {
+			Calculate();
+			GE("code").focus();
+			return false
+		}
+		GE("clock-freq").focus();
+	};
+	
+	function GE(domId) { // only shortcut
+		return document.getElementById(domId);
+	}
+	
+	function RefreshLimits(e) { // fill info about min/max limits for requested frequency based on Arduino clock frequency
+		var maxFreq = GE("clock-freq").value;
+		var minFreq = maxFreq;
+		var freqNow;
+		for (i=0; i<timersDef.length; i++) {
+			freqNow = maxFreq / ( timersDef[i].cmrMax * (timersDef[i].prescalerDef[timersDef[i].prescalerDef.length-1].value + 1) );
+			if ( freqNow < minFreq ) {
+				minFreq = freqNow;
+			}
+		}
+		GE("limits").innerHTML = "("+(Math.round(minFreq*1000)/1000 + .001)+" - "+maxFreq+" Hz)";
+		Calculate();
+	}
+
+	function FilterText(textToFilter, variables) { // changes variable placeholders in text to it's values
+		for(var variable in variables) {
+			textToFilter = textToFilter.replace(new RegExp(("§"+variable+"§"), "g"), variables[variable]);
+		}
+		return textToFilter;
+	}
+	
+	function Calculate() { // do whole calculation
+		var clockFreq = GE("clock-freq").value;
+		var reqFreq = GE("requested-freq").value;
+		var i, j, bestCmr, freqNow, bestFreq, bestFreqDif, freqDifNow, bestPrescalerDefIndex;
+		var outputCode = "";
+		var outputCode2 = "";
+		for (i=0; i<timersDef.length; i++) { // for each timer
+			if ( clockFreq / ( reqFreq * timersDef[i].prescalerDef[timersDef[i].prescalerDef.length-1].value ) >= timersDef[i].cmrMax) { // test limit
+				outputCode += FilterText(notUsableTemplate, {timerNum: i});
+				outputCode2 += FilterText(notUsableTemplate, {timerNum: i});
+			} else {
+				bestPrescalerDefIndex = 0;
+				bestFreqDif = timersDef[i].cmrMax;
+				for (j=0; j<timersDef[i].prescalerDef.length; j++) { // find best freq. match (min. difference)
+					cmrNow = Math.floor(clockFreq / ( reqFreq * timersDef[i].prescalerDef[j].value )) - 1; // Compare Match Register
+					freqNow = clockFreq / ((cmrNow + 1) * timersDef[i].prescalerDef[j].value); // freq computed back from CMR
+					freqDifNow = reqFreq - freqNow; // difference between requested freq and computed
+					if (( cmrNow <= timersDef[i].cmrMax) && (bestFreqDif > Math.abs(freqDifNow))) {
+						bestPrescalerDefIndex = j;
+						bestCmr = cmrNow;
+						bestFreq = freqNow;
+						bestFreqDif = freqDifNow;
+					}
+				}
+				//console.log("Timer: "+i, "index: "+bestPrescalerDefIndex, "computed freq: "+bestFreq+" Hz", "cmr: "+bestCmr, "prescaler: "+timersDef[i].prescalerDef[bestPrescalerDefIndex].value);
+				outputCode += FilterText(codeTemplate, {
+					timerNum: i,
+					clockFreq: clockFreq,
+					reqFreq: reqFreq,
+					cmr: bestCmr,
+					bestFreq: bestFreq,
+					prescaler: timersDef[i].prescalerDef[bestPrescalerDefIndex].value,
+					ctcBit: timersDef[i].ctcBit,
+					cmrMax: timersDef[i].cmrMax+1,
+					cs0: timersDef[i].prescalerDef[bestPrescalerDefIndex].cs0,
+					cs1: timersDef[i].prescalerDef[bestPrescalerDefIndex].cs1,
+					cs2: timersDef[i].prescalerDef[bestPrescalerDefIndex].cs2
+				});
+				outputCode2 += FilterText(codeTemplate2, {timerNum: i});
+			}
+		}
+		//console.log(outputCode);
+		GE("code").value = outputCode;
+		GE("code2").value = outputCode2;
+	}
+</script>
+</head>
+<body>
+	<h1>Arduino Timer Interrupts Calculator</h1>
+	<p>Based on instructions <a href="http://www.instructables.com/id/Arduino-Timer-Interrupts/">here</a>.<br>It is designed for ATmega 328/168 (Arduino UNO / NANO / Pro Mini, ...)</p>
+	<p><strong>Note</strong>: Timer 0 is used by arduino millis() and delay() functions!</p>
+	<form>
+		<p><label for="clock-freq">Arduino clock frequency:</label><input id="clock-freq" type="text" value="16000000" /> Hz</p>
+		<p><label for="requested-freq">Requested interrupt timer frequency:</label><input id="requested-freq" type="text" value="1000" /> Hz <span id="limits"></span></p>
+		<p><input type="submit" value="Generate/Refresh code" /></p>
+	</form>
+	<p><label for="code">Code for Arduino setup (copy one of the timers setup below):</label><textarea id="code"></textarea></p>
+	<p><label for="code2">Code for interrupt function setup (copy one of the blocks below):</label><textarea id="code2"></textarea></p>
+	<div id="footer">Other stuff: <a href="/">MC6800 assembler</a>, <a href="/font-editor-02">Pixel Font Editor</a></div>
+</body>
+</html>
